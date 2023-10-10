@@ -4,6 +4,19 @@
   
     
     <entry>
+      <title></title>
+      <link href="/archives/0.html"/>
+      <url>/archives/0.html</url>
+      
+        <content type="html"><![CDATA[<h1 id="Linux下IO模式和IO多路复用详解"><a href="#Linux下IO模式和IO多路复用详解" class="headerlink" title="Linux下IO模式和IO多路复用详解"></a>Linux下IO模式和IO多路复用详解</h1><p>今天我们来谈一谈Linuxu系统中的IO模式和IO多路复用。</p><h2 id="IO模式"><a href="#IO模式" class="headerlink" title="IO模式"></a>IO模式</h2><p>首先，我们要知道对于一次IO操作，操作系统需要干什么？</p><p>在Linux的缓存IO机制中，操作系统会将IO的数据缓存在文件系统的页缓存中，即数据会先拷贝到操作系统内核的缓冲区中，然后才将操作系统内核的数据缓冲区拷贝到应用程序的地址空间。当然，这种机制也有<strong>缺点</strong> ：数据在传输过程中需要在应用程序地址空间和内核进行多次的数据拷贝操作，这对于CPU和内存的开销是非常大的。</p><p>一次典型的网络IO调用分为两个阶段，分别是“数据就绪”和“数据读写”。数据就绪阶段分为<strong>阻塞</strong>和<strong>非阻塞</strong>，表现结果就是，阻塞当前线程或是直接返回。数据读写阶段分为<strong>同步</strong>和<strong>异步</strong>。</p><p>其中，同步表示A向B请求调用一个网路IO接口时，数据读写部分都是由A自己一个人完成的（不管是阻塞和非阻塞）；异步表示A向B请求调用一个网络IO接口时，向B传入请求的事件以及事件发生时通知的方式，A就可以去处理其他逻辑了，当B监听到事件处理完成后，会用事先约定好的通知方式，<strong>通知</strong>A处理结果。在异步处理逻辑中，一定要关注通知二字，这是区分是同步和异步的重要的一点。</p><p>因此，Linux系统中产生了下面5种网络模式：</p><ul><li>阻塞IO</li><li>非阻塞IO</li><li>IO多路复用</li><li>信号驱动IO</li><li>异步IO</li></ul><h3 id="阻塞IO（blocking-IO）"><a href="#阻塞IO（blocking-IO）" class="headerlink" title="阻塞IO（blocking IO）"></a>阻塞IO（blocking IO）</h3><p><img src="https://z1.ax1x.com/2023/10/10/pPzlRdH.png" alt="阻塞IO"></p><p>在Linux中，默认情况下所有socket都是阻塞的。当调用read系统调用时，kernel就开始了第一阶段：数据准备。kernel就会等待数据的到来，也就是数据被拷贝到操作内核是需要一个过程的，而在用户进程这边，整个进程会被阻塞（进程自己选择的结果）。当kernel等到数据准备好了，就会将数据从kernel中拷贝到用户内存，然后kernel返回结果，用户进程解除阻塞状态，重新运行起来。</p><h3 id="非阻塞IO（nonblocking-IO）"><a href="#非阻塞IO（nonblocking-IO）" class="headerlink" title="非阻塞IO（nonblocking IO）"></a>非阻塞IO（nonblocking IO）</h3><p><img src="https://z1.ax1x.com/2023/10/10/pPztT4e.png" alt="非阻塞IO"></p><p>在Linux中，socket可以设置为非阻塞IO模式。非阻塞IO模式下的流程如上所示。</p><p>当应用进程进行read操作时，如果kernel中的数据没准备好，它并不是阻塞应用进程，而是立刻返回EAGAIN错误代码（在read操作时，表示取文件&#x2F;设备时资源临时不可用,需要重试读取操作）。从应用进程的角度来看，应用进程发起一个read操作后，并不需要等待，而是马上得到了一个结果。应用进程判断结果是一个error时，它就知道kernel还没准备好数据，于是再次发起read操作。一旦kernel中的数据准备好了，并再次收到了应用进程的read系统调用，就会马上将数据从内核空间拷贝到用户空间，然后返回，应用处理数据。</p><p>所以说，非阻塞IO的特点是用户进程不断地<strong>轮询</strong>kernel，数据准备好了没有。</p><h3 id="IO多路复用（-IO-multiplexing）"><a href="#IO多路复用（-IO-multiplexing）" class="headerlink" title="IO多路复用（ IO multiplexing）"></a>IO多路复用（ IO multiplexing）</h3><p><a href="https://imgse.com/i/pPzN6Vf"><img src="https://z1.ax1x.com/2023/10/10/pPzN6Vf.md.png" alt="IO多路复用"></a></p><p>IO多路复用就是我们常说<strong>select</strong>、<strong>poll</strong>、<strong>epoll</strong>，这里我们先提前说一下，这三种IO多路复用接口都是<strong>同步IO</strong>，请谨记。</p><p>select&#x2F;epoll的好处是单个process就可以同时处理多个网络连接的IO。IO多路复用的基本原理就是select、poll、epoll这些接口会不断地轮询所有的socket，当某个socket有数据到达了，就告诉用户进程。当应用进程调用了select，那整个进程都会被阻塞，与此同时，kernel会“监视”所有select负责的socket，当其中的任何一个socket的数据准备好了，select就会返回。应用进程就接着调用read操作，将数据从kernel拷贝到应用进程。</p><h3 id="信号驱动IO（signal-driven）"><a href="#信号驱动IO（signal-driven）" class="headerlink" title="信号驱动IO（signal-driven）"></a>信号驱动IO（signal-driven）</h3><p><a href="https://imgse.com/i/pPzUJQs"><img src="https://z1.ax1x.com/2023/10/11/pPzUJQs.md.png" alt="信号驱动"></a></p><p>内核在第一个阶段是异步，在第二个阶段是同步。与非阻塞IO的区别在于它提供了消息通知机制，不需要应用进程来不断地轮询检查，减少了系统API的调用次数，提高了效率。</p><h3 id="异步IO（asynchronous）"><a href="#异步IO（asynchronous）" class="headerlink" title="异步IO（asynchronous）"></a>异步IO（asynchronous）</h3><p><a href="https://imgse.com/i/pPzUBYF"><img src="https://z1.ax1x.com/2023/10/11/pPzUBYF.md.png" alt="异步IO"></a></p><p>应用进程发起read操作后，就去做其他事情了，然后就等待将kerne发送信号l通知应用进程数据准备好了就行，告诉应用进程可以进行read操作。</p><h2 id="IO多路复用之select、poll、epoll详解"><a href="#IO多路复用之select、poll、epoll详解" class="headerlink" title="IO多路复用之select、poll、epoll详解"></a>IO多路复用之select、poll、epoll详解</h2><h3 id="select"><a href="#select" class="headerlink" title="select"></a>select</h3>]]></content>
+      
+      
+      
+    </entry>
+    
+    
+    
+    <entry>
       <title>如何深入理解虚函数和多态</title>
       <link href="/archives/edf5f749.html"/>
       <url>/archives/edf5f749.html</url>
